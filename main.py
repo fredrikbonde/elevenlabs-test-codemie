@@ -125,6 +125,8 @@ async def stream_claude_response(
 async def chat_completions(request: Request):
     conversation_id = str(uuid.uuid4())[:8]
 
+    logger.info("in chat_completions endpoint")
+
     try:
         body = await request.json()
     except Exception:
