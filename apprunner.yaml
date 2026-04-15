@@ -18,4 +18,4 @@ run:
       value: "1024"
   secrets:
     - name: ANTHROPIC_API_KEY
-    - value-from: "arn:aws:ssm:eu-central-1:745559540611:parameter/elevenlabs-bridge/anthropic-api-key"
+      value-from: "arn:aws:ssm:eu-central-1:745559540611:parameter/elevenlabs-bridge/anthropic-api-key"
