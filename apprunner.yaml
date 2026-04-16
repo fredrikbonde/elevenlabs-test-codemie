@@ -16,6 +16,14 @@ run:
       value: "claude-haiku-4-5-20251001"
     - name: MAX_TOKENS
       value: "1024"
+    - name: CODEMIE_ASSISTANT_ID
+      value: "5ad0aa50-13a1-4afe-b08a-16af9380d92c"
+    - name: CODEMIE_LLM_MODEL
+      value: "claude-haiku-4-5-20251001"
+    - name: CODEMIE_ENDPOINT
+      value: "https://codemie.lab.epam.com/code-assistant-api/v1/assistants"
   secrets:
-    - name: ANTHROPIC_API_KEY
-      value-from: "arn:aws:ssm:eu-central-1:745559540611:parameter/elevenlabs-bridge/anthropic-api-key"
+    - name: CODEMIE_OAUTH_PROXY_0
+      value-from: "arn:aws:ssm:eu-central-1:745559540611:parameter/elevenlabs-bridge/codemie-oauth-proxy-0"
+    - name: CODEMIE_OAUTH_PROXY_1
+      value-from: "arn:aws:ssm:eu-central-1:745559540611:parameter/elevenlabs-bridge/codemie-oauth-proxy-1"

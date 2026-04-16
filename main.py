@@ -1,7 +1,8 @@
 """
-ElevenLabs <-> Claude Bridge
+ElevenLabs <-> CodemIE Bridge
 Exposes an OpenAI-compatible /chat/completions endpoint.
 ElevenLabs agent calls this as its custom LLM.
+Translates to CodemIE's internal API format using cookie auth.
 """
 
 import os
@@ -11,14 +12,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
-import anthropic
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Logging setup ──────────────────────────────────────────────────────────────
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -27,94 +28,182 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-app = FastAPI(title="ElevenLabs-Claude Bridge")
+app = FastAPI(title="ElevenLabs-CodemIE Bridge")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
+CODEMIE_ENDPOINT     = os.getenv("CODEMIE_ENDPOINT", "https://codemie.lab.epam.com/code-assistant-api/v1/assistants")
+CODEMIE_ASSISTANT_ID = os.getenv("CODEMIE_ASSISTANT_ID")
+CODEMIE_LLM_MODEL    = os.getenv("CODEMIE_LLM_MODEL", "claude-haiku-4-5-20251001")
+OAUTH_PROXY_0        = os.getenv("CODEMIE_OAUTH_PROXY_0")
+OAUTH_PROXY_1        = os.getenv("CODEMIE_OAUTH_PROXY_1")
 
-if not ANTHROPIC_API_KEY:
-    raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
+if not CODEMIE_ASSISTANT_ID:
+    raise RuntimeError("CODEMIE_ASSISTANT_ID is not set")
+if not OAUTH_PROXY_0 or not OAUTH_PROXY_1:
+    raise RuntimeError("CODEMIE_OAUTH_PROXY_0 and CODEMIE_OAUTH_PROXY_1 must be set")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-
-def convert_messages(messages: list) -> tuple[str | None, list]:
+def build_codemie_request(messages: list, conversation_id: str) -> dict:
     """
-    Split OpenAI-style messages into a system prompt + user/assistant turns
-    that Anthropic's API expects.
+    Convert OpenAI-style messages into CodemIE request format.
+    The last user message becomes 'text', prior turns become 'history'.
     """
-    system_prompt = None
-    converted = []
+    now = datetime.now(timezone.utc).isoformat()
+    history = []
+    last_user_text = ""
 
     for msg in messages:
-        role = msg.get("role")
+        role = msg.get("role", "")
         content = msg.get("content", "")
 
         if role == "system":
-            system_prompt = content
-        elif role in ("user", "assistant"):
-            converted.append({"role": role, "content": content})
+            continue  # CodemIE uses systemPrompt field, handled separately
+        elif role == "user":
+            last_user_text = content
+            history.append({
+                "role": "User",
+                "message": content,
+                "createdAt": now,
+            })
+        elif role == "assistant":
+            history.append({
+                "role": "Assistant",
+                "message": content,
+                "createdAt": now,
+                "assistantId": CODEMIE_ASSISTANT_ID,
+            })
 
-    return system_prompt, converted
+    # Remove the last user message from history (it becomes 'text')
+    if history and history[-1]["role"] == "User":
+        history = history[:-1]
+
+    # Extract system prompt if present
+    system_prompt = next(
+        (m.get("content", "") for m in messages if m.get("role") == "system"),
+        ""
+    )
+
+    return {
+        "conversationId": conversation_id,
+        "text": last_user_text,
+        "contentRaw": f"<p>{last_user_text}</p>",
+        "file_names": [],
+        "llmModel": CODEMIE_LLM_MODEL,
+        "history": history,
+        "historyIndex": len(history),
+        "mcpServerSingleUsage": False,
+        "workflowExecutionId": None,
+        "stream": True,
+        "topK": 10,
+        "systemPrompt": system_prompt,
+        "backgroundTask": False,
+        "metadata": None,
+        "toolsConfig": [],
+        "outputSchema": None,
+    }
 
 
-async def stream_claude_response(
-    system_prompt: str | None,
+async def stream_codemie_response(
     messages: list,
     conversation_id: str,
 ) -> AsyncGenerator[str, None]:
     """
-    Stream a Claude response as Server-Sent Events in OpenAI format
-    so ElevenLabs can consume it.
+    Call CodemIE, parse the streaming JSON chunks,
+    and re-emit as OpenAI SSE format for ElevenLabs.
     """
-    kwargs = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": MAX_TOKENS,
-        "messages": messages,
+    url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
+    payload = build_codemie_request(messages, conversation_id)
+
+    cookies = {
+        "_oauth2_proxy_0": OAUTH_PROXY_0,
+        "_oauth2_proxy_1": OAUTH_PROXY_1,
     }
-    if system_prompt:
-        kwargs["system"] = system_prompt
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "*/*",
+        "Origin": "https://codemie.lab.epam.com",
+        "Referer": "https://codemie.lab.epam.com/",
+        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
+    }
 
     full_response = []
 
     try:
-        with client.messages.stream(**kwargs) as stream:
-            for text_chunk in stream.text_stream:
-                full_response.append(text_chunk)
-                chunk = {
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "delta": {"content": text_chunk},
-                            "index": 0,
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream(
+                "POST", url,
+                json=payload,
+                headers=headers,
+                cookies=cookies,
+            ) as response:
 
-        # Log the full assistant response once streaming is complete
-        logger.info(
-            "[%s] ASSISTANT: %s",
-            conversation_id,
-            "".join(full_response),
-        )
+                if response.status_code != 200:
+                    body = await response.aread()
+                    logger.error(
+                        "[%s] CodemIE returned %d: %s",
+                        conversation_id, response.status_code, body.decode()
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"CodemIE returned {response.status_code}"
+                    )
 
-    except Exception as e:
-        logger.error("[%s] Error streaming Claude response: %s", conversation_id, str(e))
+                buffer = ""
+                async for raw_chunk in response.aiter_text():
+                    buffer += raw_chunk
+
+                    # CodemIE streams raw JSON objects back-to-back, not newline delimited
+                    # We parse them out greedily
+                    while buffer:
+                        try:
+                            obj, idx = json.JSONDecoder().raw_decode(buffer)
+                            buffer = buffer[idx:].lstrip()
+                        except json.JSONDecodeError:
+                            break  # Incomplete chunk, wait for more data
+
+                        thought = obj.get("thought")
+                        is_last = obj.get("last", False)
+
+                        if is_last:
+                            # Final chunk — use the complete 'generated' field
+                            generated = obj.get("generated", "")
+                            if generated:
+                                full_response = [generated]
+                                chunk = {
+                                    "object": "chat.completion.chunk",
+                                    "choices": [{
+                                        "delta": {"content": generated},
+                                        "index": 0,
+                                        "finish_reason": None,
+                                    }],
+                                }
+                                yield f"data: {json.dumps(chunk)}\n\n"
+                        elif thought and thought.get("in_progress") and thought.get("message"):
+                            # Intermediate thought chunk
+                            text = thought["message"]
+                            full_response.append(text)
+                            chunk = {
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "delta": {"content": text},
+                                    "index": 0,
+                                    "finish_reason": None,
+                                }],
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n"
+
+        logger.info("[%s] ASSISTANT: %s", conversation_id, "".join(full_response))
+
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.error("[%s] Error calling CodemIE: %s", conversation_id, str(e))
+        raise HTTPException(status_code=502, detail=str(e))
 
-    # Send the final [DONE] marker
+    # OpenAI SSE terminator
     done_chunk = {
         "object": "chat.completion.chunk",
-        "choices": [
-            {
-                "delta": {},
-                "index": 0,
-                "finish_reason": "stop",
-            }
-        ],
+        "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
     }
     yield f"data: {json.dumps(done_chunk)}\n\n"
     yield "data: [DONE]\n\n"
@@ -123,9 +212,7 @@ async def stream_claude_response(
 @app.post("/chat/completions")
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    conversation_id = str(uuid.uuid4())[:8]
-
-    logger.info("in chat_completions endpoint")
+    conversation_id = str(uuid.uuid4())
 
     try:
         body = await request.json()
@@ -136,61 +223,26 @@ async def chat_completions(request: Request):
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    system_prompt, converted_messages = convert_messages(messages)
-
-    # Log incoming system prompt
-    if system_prompt:
-        logger.info("[%s] SYSTEM: %s", conversation_id, system_prompt)
-
-    # Log the latest user message
-    user_messages = [m for m in converted_messages if m["role"] == "user"]
+    # Log incoming user message
+    user_messages = [m for m in messages if m.get("role") == "user"]
     if user_messages:
         logger.info("[%s] USER: %s", conversation_id, user_messages[-1]["content"])
 
-    logger.info(
-        "[%s] Request: model=%s, messages=%d, stream=%s",
-        conversation_id,
-        CLAUDE_MODEL,
-        len(converted_messages),
-        body.get("stream", True),
+    return StreamingResponse(
+        stream_codemie_response(messages, conversation_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
-
-    stream = body.get("stream", True)
-
-    if stream:
-        return StreamingResponse(
-            stream_claude_response(system_prompt, converted_messages, conversation_id),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    else:
-        try:
-            response = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=MAX_TOKENS,
-                messages=converted_messages,
-                **({"system": system_prompt} if system_prompt else {}),
-            )
-            text = response.content[0].text
-            logger.info("[%s] ASSISTANT: %s", conversation_id, text)
-            return {
-                "object": "chat.completion",
-                "choices": [
-                    {
-                        "message": {"role": "assistant", "content": text},
-                        "index": 0,
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-        except Exception as e:
-            logger.error("[%s] Error calling Claude: %s", conversation_id, str(e))
-            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": CLAUDE_MODEL}
+    return {
+        "status": "ok",
+        "backend": "CodemIE",
+        "model": CODEMIE_LLM_MODEL,
+        "assistant_id": CODEMIE_ASSISTANT_ID,
+    }
