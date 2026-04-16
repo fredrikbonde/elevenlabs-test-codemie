@@ -177,18 +177,11 @@ async def stream_codemie_response(
                         is_last = obj.get("last", False)
 
                         if is_last:
+                            # Just capture for logging — don't re-send,
+                            # content was already streamed via thought chunks
                             generated = obj.get("generated", "")
                             if generated:
                                 full_response = [generated]
-                                chunk = {
-                                    "object": "chat.completion.chunk",
-                                    "choices": [{
-                                        "delta": {"content": generated},
-                                        "index": 0,
-                                        "finish_reason": None,
-                                    }],
-                                }
-                                yield f"data: {json.dumps(chunk)}\n\n"
                         elif thought and thought.get("in_progress") and thought.get("message"):
                             text = thought["message"]
                             full_response.append(text)
@@ -267,7 +260,6 @@ async def ping():
 
     url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
     payload = build_codemie_request(messages, conversation_id)
-
 
     headers = {
         "Content-Type": "application/json",
