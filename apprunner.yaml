@@ -17,7 +17,7 @@ run:
     - name: MAX_TOKENS
       value: "1024"
     - name: CODEMIE_ASSISTANT_ID
-      value: "56853e35-ec97-46e6-9fc1-6087f4d5de52"
+      value: "5ad0aa50-13a1-4afe-b08a-16af9380d92c"
     - name: CODEMIE_LLM_MODEL
       value: "claude-haiku-4-5-20251001"
     - name: CODEMIE_ENDPOINT
