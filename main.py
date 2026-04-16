@@ -214,7 +214,7 @@ async def stream_codemie_response(
 @app.post("/chat/completions")
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    conversation_id = "23cc55fe-00d1-4d71-91b8-ff7c184b59e8" #str(uuid.uuid4())
+    conversation_id = "56853e35-ec97-46e6-9fc1-6087f4d5de52" #str(uuid.uuid4())
 
     try:
         body = await request.json()
