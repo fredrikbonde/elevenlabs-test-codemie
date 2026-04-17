@@ -35,9 +35,11 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────────────
 app = FastAPI(title="ElevenLabs-CodemIE Bridge")
 
-CODEMIE_ENDPOINT     = os.getenv("CODEMIE_ENDPOINT", "https://codemie.lab.epam.com/code-assistant-api/v1/assistants")
-CODEMIE_ASSISTANT_ID = os.getenv("CODEMIE_ASSISTANT_ID")
-CODEMIE_LLM_MODEL    = os.getenv("CODEMIE_LLM_MODEL", "claude-haiku-4-5-20251001")
+CODEMIE_ENDPOINT          = os.getenv("CODEMIE_ENDPOINT", "https://codemie.lab.epam.com/code-assistant-api/v1/assistants")
+CODEMIE_ASSISTANT_ID      = os.getenv("CODEMIE_ASSISTANT_ID")
+CODEMIE_ASSISTANT_FOLDER  = os.getenv("CODEMIE_ASSISTANT_FOLDER", "")
+CODEMIE_LLM_MODEL         = os.getenv("CODEMIE_LLM_MODEL", "claude-haiku-4-5-20251001")
+CODEMIE_CONVERSATIONS_URL = CODEMIE_ENDPOINT.rsplit("/assistants", 1)[0] + "/conversations"
 
 # oauth2_proxy splits tokens across multiple cookies with the same name.
 # Store each occurrence separately and we'll send them all as a raw header.
@@ -49,6 +51,39 @@ if not CODEMIE_ASSISTANT_ID:
     raise RuntimeError("CODEMIE_ASSISTANT_ID is not set")
 if not OAUTH_PROXY_0_A or not OAUTH_PROXY_1:
     raise RuntimeError("CODEMIE_OAUTH_PROXY_0_A and CODEMIE_OAUTH_PROXY_1 must be set")
+
+
+async def create_conversation() -> str:
+    """
+    Create a new CodemIE conversation and return its conversation_id.
+    Called once per chat request before streaming begins.
+    """
+    payload = {
+        "initial_assistant_id": CODEMIE_ASSISTANT_ID,
+        "folder": CODEMIE_ASSISTANT_FOLDER,
+        "is_workflow": False,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "*/*",
+        "Origin": "https://codemie.lab.epam.com",
+        "Referer": "https://codemie.lab.epam.com/",
+        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
+        "Cookie": build_cookie_header(),
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(CODEMIE_CONVERSATIONS_URL, json=payload, headers=headers)
+        if response.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to create conversation: CodemIE returned {response.status_code}"
+            )
+        data = response.json()
+        conversation_id = data.get("conversation_id") or data.get("id")
+        if not conversation_id:
+            raise HTTPException(status_code=502, detail="CodemIE returned no conversation_id")
+        logger.info("Created conversation: %s", conversation_id)
+        return conversation_id
 
 
 def build_cookie_header() -> str:
@@ -215,11 +250,15 @@ async def stream_codemie_response(
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     conversation_id = "56853e35-ec97-46e6-9fc1-6087f4d5de52" #str(uuid.uuid4())
+    #conversation_id = await create_conversation()
 
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    logger.info("REQUEST HEADERS: %s", dict(request.headers))
+    logger.info("REQUEST BODY (non-message keys): %s", {k: v for k, v in body.items() if k != "messages"})
 
     messages = body.get("messages", [])
     if not messages:
