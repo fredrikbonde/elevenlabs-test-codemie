@@ -109,6 +109,7 @@ Raw JSON objects concatenated, no SSE wrapper:
 |---|---|---|
 | `CODEMIE_ENDPOINT` | Base URL for CodemIE API | No |
 | `CODEMIE_ASSISTANT_ID` | ElevenLabs/CodemIE assistant UUID | No |
+| `CODEMIE_ASSISTANT_FOLDER` | Human-readable name of the assistant (used when creating conversations) | No |
 | `CODEMIE_LLM_MODEL` | LLM model name | No |
 | `CODEMIE_OAUTH_PROXY_0_A` | First `_oauth2_proxy_0` cookie | Yes (SSM) |
 | `CODEMIE_OAUTH_PROXY_0_B` | Second `_oauth2_proxy_0` cookie | Yes (SSM) |

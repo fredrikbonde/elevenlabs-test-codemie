@@ -8,6 +8,10 @@ Cookie note: oauth2_proxy splits large tokens across multiple cookies
 with the same name. We store them as CODEMIE_OAUTH_PROXY_0_A and
 CODEMIE_OAUTH_PROXY_0_B (and _1) and send them as a raw Cookie header
 so duplicates are preserved correctly.
+
+Conversation mapping: ElevenLabs traceparent trace IDs are mapped to
+CodemIE conversation IDs in an in-memory dict. This is sufficient for
+a demo but should be replaced with DynamoDB for production.
 """
 
 import os
@@ -41,10 +45,8 @@ CODEMIE_ASSISTANT_FOLDER  = os.getenv("CODEMIE_ASSISTANT_FOLDER", "")
 CODEMIE_LLM_MODEL         = os.getenv("CODEMIE_LLM_MODEL", "claude-haiku-4-5-20251001")
 CODEMIE_CONVERSATIONS_URL = CODEMIE_ENDPOINT.rsplit("/assistants", 1)[0] + "/conversations"
 
-# oauth2_proxy splits tokens across multiple cookies with the same name.
-# Store each occurrence separately and we'll send them all as a raw header.
-OAUTH_PROXY_0_A = os.getenv("CODEMIE_OAUTH_PROXY_0_A")  # first occurrence
-OAUTH_PROXY_0_B = os.getenv("CODEMIE_OAUTH_PROXY_0_B")  # second occurrence (may be None)
+OAUTH_PROXY_0_A = os.getenv("CODEMIE_OAUTH_PROXY_0_A")
+OAUTH_PROXY_0_B = os.getenv("CODEMIE_OAUTH_PROXY_0_B")
 OAUTH_PROXY_1   = os.getenv("CODEMIE_OAUTH_PROXY_1")
 
 if not CODEMIE_ASSISTANT_ID:
@@ -53,10 +55,58 @@ if not OAUTH_PROXY_0_A or not OAUTH_PROXY_1:
     raise RuntimeError("CODEMIE_OAUTH_PROXY_0_A and CODEMIE_OAUTH_PROXY_1 must be set")
 
 
+# ── Conversation store ─────────────────────────────────────────────────────────
+# Maps ElevenLabs traceparent trace ID -> CodemIE conversation ID.
+# In-memory for demo purposes. Replace with DynamoDB for production.
+_conversation_store: dict[str, str] = {}
+
+
+async def get_or_create_conversation(elevenlabs_id: str) -> str:
+    """
+    Look up the CodemIE conversation ID for a given ElevenLabs trace ID.
+    If none exists, create a new CodemIE conversation and store the mapping.
+    """
+    if elevenlabs_id in _conversation_store:
+        codemie_id = _conversation_store[elevenlabs_id]
+        logger.info("[%s] Reusing CodemIE conversation: %s", elevenlabs_id, codemie_id)
+        return codemie_id
+
+    codemie_id = await create_conversation()
+    _conversation_store[elevenlabs_id] = codemie_id
+    logger.info("[%s] Created new CodemIE conversation: %s", elevenlabs_id, codemie_id)
+    return codemie_id
+
+
+def get_elevenlabs_id(request: Request) -> str:
+    """
+    Extract a stable session ID from the ElevenLabs request.
+    Uses the trace ID from the W3C traceparent header, which remains
+    constant across all requests in the same ElevenLabs conversation.
+    Falls back to a new UUID if the header is missing.
+    """
+    traceparent = request.headers.get("traceparent", "")
+    parts = traceparent.split("-")
+    if len(parts) >= 4:
+        return parts[1]
+    return str(uuid.uuid4())
+
+
+# ── CodemIE helpers ────────────────────────────────────────────────────────────
+
+def build_cookie_header() -> str:
+    """
+    Build a raw Cookie header string that preserves duplicate cookie names.
+    """
+    parts = [f"_oauth2_proxy_0={OAUTH_PROXY_0_A}"]
+    if OAUTH_PROXY_0_B:
+        parts.append(f"_oauth2_proxy_0={OAUTH_PROXY_0_B}")
+    parts.append(f"_oauth2_proxy_1={OAUTH_PROXY_1}")
+    return "; ".join(parts)
+
+
 async def create_conversation() -> str:
     """
     Create a new CodemIE conversation and return its conversation_id.
-    Called once per chat request before streaming begins.
     """
     payload = {
         "initial_assistant_id": CODEMIE_ASSISTANT_ID,
@@ -82,19 +132,7 @@ async def create_conversation() -> str:
         conversation_id = data.get("conversation_id") or data.get("id")
         if not conversation_id:
             raise HTTPException(status_code=502, detail="CodemIE returned no conversation_id")
-        logger.info("Created conversation: %s", conversation_id)
         return conversation_id
-
-
-def build_cookie_header() -> str:
-    """
-    Build a raw Cookie header string that preserves duplicate cookie names.
-    """
-    parts = [f"_oauth2_proxy_0={OAUTH_PROXY_0_A}"]
-    if OAUTH_PROXY_0_B:
-        parts.append(f"_oauth2_proxy_0={OAUTH_PROXY_0_B}")
-    parts.append(f"_oauth2_proxy_1={OAUTH_PROXY_1}")
-    return "; ".join(parts)
 
 
 def build_codemie_request(messages: list, conversation_id: str) -> dict:
@@ -159,6 +197,7 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
 async def stream_codemie_response(
     messages: list,
     conversation_id: str,
+    elevenlabs_id: str,
 ) -> AsyncGenerator[str, None]:
     """
     Call CodemIE, parse the streaming JSON chunks,
@@ -190,7 +229,7 @@ async def stream_codemie_response(
                     body = await response.aread()
                     logger.error(
                         "[%s] CodemIE returned %d: %s",
-                        conversation_id, response.status_code, body.decode()
+                        elevenlabs_id, response.status_code, body.decode()
                     )
                     raise HTTPException(
                         status_code=502,
@@ -230,12 +269,12 @@ async def stream_codemie_response(
                             }
                             yield f"data: {json.dumps(chunk)}\n\n"
 
-        logger.info("[%s] ASSISTANT: %s", conversation_id, "".join(full_response))
+        logger.info("[%s] ASSISTANT: %s", elevenlabs_id, "".join(full_response))
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("[%s] Error calling CodemIE: %s", conversation_id, str(e))
+        logger.error("[%s] Error calling CodemIE: %s", elevenlabs_id, str(e))
         raise HTTPException(status_code=502, detail=str(e))
 
     done_chunk = {
@@ -246,35 +285,32 @@ async def stream_codemie_response(
     yield "data: [DONE]\n\n"
 
 
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
 @app.post("/chat/completions")
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    conversation_id = "56853e35-ec97-46e6-9fc1-6087f4d5de52" #str(uuid.uuid4())
-    #conversation_id = await create_conversation()
+    # Extract stable ElevenLabs session ID from traceparent header
+    elevenlabs_id = get_elevenlabs_id(request)
 
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    logger.info("FULL REQUEST: %s", json.dumps({
-        "method": request.method,
-        "url": str(request.url),
-        "headers": dict(request.headers),
-        "query_params": dict(request.query_params),
-        "body": body,
-    }, indent=2))
-
     messages = body.get("messages", [])
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
+    # Get or create a CodemIE conversation for this ElevenLabs session
+    codemie_conversation_id = await get_or_create_conversation(elevenlabs_id)
+
     user_messages = [m for m in messages if m.get("role") == "user"]
     if user_messages:
-        logger.info("[%s] USER: %s", conversation_id, user_messages[-1]["content"])
+        logger.info("[%s] USER: %s", elevenlabs_id, user_messages[-1]["content"])
 
     return StreamingResponse(
-        stream_codemie_response(messages, conversation_id),
+        stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -290,6 +326,7 @@ async def health():
         "backend": "CodemIE",
         "model": CODEMIE_LLM_MODEL,
         "assistant_id": CODEMIE_ASSISTANT_ID,
+        "active_conversations": len(_conversation_store),
     }
 
 
@@ -300,7 +337,8 @@ async def ping():
     Hit this in a browser to verify cookies and connectivity are working.
     """
     messages = [{"role": "user", "content": "Hello! Please respond with a short greeting."}]
-    conversation_id = "ping-" + str(uuid.uuid4())[:8]
+    ping_elevenlabs_id = "ping-" + str(uuid.uuid4())[:8]
+    conversation_id = await create_conversation()
 
     url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
     payload = build_codemie_request(messages, conversation_id)
@@ -336,11 +374,11 @@ async def ping():
                             break
                         if obj.get("last"):
                             generated = obj.get("generated", "")
-                            logger.info("[%s] PING response: %s", conversation_id, generated)
+                            logger.info("[%s] PING response: %s", ping_elevenlabs_id, generated)
                             return {"status": "ok", "response": generated}
 
         return {"status": "error", "detail": "No response received from CodemIE"}
 
     except Exception as e:
-        logger.error("[%s] Ping failed: %s", conversation_id, str(e))
+        logger.error("[%s] Ping failed: %s", ping_elevenlabs_id, str(e))
         return {"status": "error", "detail": str(e)}

@@ -38,6 +38,7 @@ Required environment variables (in `.env` locally, AWS Secrets Manager in prod):
 |---|---|
 | `CODEMIE_ENDPOINT` | CodemIE API base URL |
 | `CODEMIE_ASSISTANT_ID` | Which CodemIE assistant to use |
+| `CODEMIE_ASSISTANT_FOLDER` | Human-readable name of the assistant (used when creating conversations) |
 | `CODEMIE_LLM_MODEL` | Model name (e.g. `claude-haiku-4-5-20251001`) |
 | `CODEMIE_OAUTH_PROXY_0_A` | First half of `_oauth2_proxy_0` cookie |
 | `CODEMIE_OAUTH_PROXY_0_B` | Second half of `_oauth2_proxy_0` cookie |
@@ -47,6 +48,6 @@ OAuth cookies expire and must be manually refreshed — this is a known limitati
 
 ## Known issues
 
-- Conversation ID is hardcoded (line ~217 in `main.py`) — should be unique per conversation in production
+- Conversation ID is created via `POST /v1/conversations` on CodemIE at the start of each request — currently once per turn, needs session tracking to create it only once per ElevenLabs conversation
 - No test suite exists
 - Deployed to AWS App Runner via `apprunner.yaml`
