@@ -257,8 +257,13 @@ async def chat_completions(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    logger.info("REQUEST HEADERS: %s", dict(request.headers))
-    logger.info("REQUEST BODY (non-message keys): %s", {k: v for k, v in body.items() if k != "messages"})
+    logger.info("FULL REQUEST: %s", json.dumps({
+        "method": request.method,
+        "url": str(request.url),
+        "headers": dict(request.headers),
+        "query_params": dict(request.query_params),
+        "body": body,
+    }, indent=2))
 
     messages = body.get("messages", [])
     if not messages:
