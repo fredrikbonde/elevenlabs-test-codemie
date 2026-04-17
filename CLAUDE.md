@@ -28,6 +28,7 @@ Everything lives in `main.py`. Key components:
 - **`/chat/completions` and `/v1/chat/completions`** — accept OpenAI-format requests, return OpenAI-format SSE streaming responses
 - **`build_codemie_request()`** — translates OpenAI `messages[]` to CodemIE format (system prompt + history + current user message wrapped in `<p>` tags)
 - **`stream_codemie_response()`** — async HTTP streaming call to CodemIE, converts JSON chunks to OpenAI SSE format
+- **`create_conversation()`** — POSTs to CodemIE's `/v1/conversations` endpoint to obtain a `conversation_id` before each chat; uses `CODEMIE_ASSISTANT_ID` and `CODEMIE_ASSISTANT_FOLDER`
 - **`build_cookie_header()`** — constructs `oauth2_proxy` auth cookies from three env vars (`CODEMIE_OAUTH_PROXY_0_A`, `CODEMIE_OAUTH_PROXY_0_B`, `CODEMIE_OAUTH_PROXY_1`); `_oauth2_proxy_0` appears twice to split large tokens
 
 ## Configuration

@@ -58,6 +58,18 @@ We send these as a **raw Cookie header string** (not a dict) to preserve duplica
 
 ⚠️ Cookies expire periodically. When you get 401 errors, refresh them from Firefox DevTools.
 
+### Conversation creation
+Before sending a message to CodemIE, a conversation must be created via:
+```
+POST https://codemie.lab.epam.com/code-assistant-api/v1/conversations
+{"initial_assistant_id": "<CODEMIE_ASSISTANT_ID>", "folder": "<CODEMIE_ASSISTANT_FOLDER>", "is_workflow": false}
+```
+Response contains `conversation_id` (also duplicated as `id`). This ID is passed as `conversationId` in every subsequent message request.
+
+The conversations base URL is derived from `CODEMIE_ENDPOINT` by replacing `/assistants` with `/conversations`.
+
+⚠️ Currently `create_conversation()` is called on every incoming request (every turn). This needs to be fixed — conversation creation should happen once per ElevenLabs session, not once per turn. Pending investigation of what session identifier ElevenLabs includes in requests.
+
 ### Conversation history
 We rely entirely on ElevenLabs to maintain conversation history. ElevenLabs sends the full message history on every request (standard OpenAI chat completions behaviour). We convert this to CodemIE's `history` array format.
 
