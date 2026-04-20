@@ -15,7 +15,7 @@ run:
     - name: CODEMIE_ENDPOINT
       value: "https://codemie.lab.epam.com/code-assistant-api/v1/assistants"
     - name: CODEMIE_ASSISTANT_ID
-      value: "5ad0aa50-13a1-4afe-b08a-16af9380d92c"
+      value: "5d6764cb-ddb9-4b69-8097-e0125b941c51"
     - name: CODEMIE_ASSISTANT_FOLDER
       value: "ElevenLabs"
     - name: CODEMIE_LLM_MODEL
