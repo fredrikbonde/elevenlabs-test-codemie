@@ -91,9 +91,7 @@ def get_elevenlabs_id(request: Request) -> str:
     return str(uuid.uuid4())
 
 
-# ── CodemIE helpers ────────────────────────────────────────────────────────────
-
-def build_cookie_header() -> str:
+# ── Codemie:
     """
     Build a raw Cookie header string that preserves duplicate cookie names.
     """
