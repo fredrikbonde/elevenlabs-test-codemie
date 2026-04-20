@@ -47,16 +47,14 @@ CodemIE does NOT use standard SSE (`data: {...}\n\n`). It streams raw JSON objec
 - Final chunk: `last: true`, full text in `generated` (we skip re-sending this to avoid duplication)
 - We parse these using `json.JSONDecoder().raw_decode()` in a buffer loop
 
-### Cookie authentication
-CodemIE has no API key mechanism for external/programmatic access (this is a PoC — proper credentials to be requested later). Authentication uses browser session cookies stolen via Firefox DevTools.
+### Bearer token authentication (Keycloak)
+Auth uses Keycloak ROPC (Resource Owner Password Credentials) flow with a service account (`CODEMIE_USERNAME` / `CODEMIE_PASSWORD`). This replaced the previous browser cookie approach.
 
-`oauth2_proxy` splits large tokens across multiple cookies with the **same name**:
-- `_oauth2_proxy_0` appears **twice** (stored as `CODEMIE_OAUTH_PROXY_0_A` and `CODEMIE_OAUTH_PROXY_0_B`)
-- `_oauth2_proxy_1` appears once
-
-We send these as a **raw Cookie header string** (not a dict) to preserve duplicates. All `_ga_*` and `__cf_bm` cookies are analytics/CDN and not needed.
-
-⚠️ Cookies expire periodically. When you get 401 errors, refresh them from Firefox DevTools.
+- On startup, `TokenCache._authenticate()` fetches an access token and refresh token from Keycloak
+- `TokenCache.get_token()` is called before every CodemIE request; it returns the cached token if more than 1 hour remains, otherwise refreshes proactively
+- If the refresh token has also expired, it falls back to full re-authentication
+- All CodemIE requests use `Authorization: Bearer <token>` header via `get_auth_headers()`
+- `/health` exposes `token_valid` and `token_expires_in_seconds` for monitoring
 
 ### Conversation creation
 Before sending a message to CodemIE, a conversation must be created via:
@@ -68,7 +66,7 @@ Response contains `conversation_id` (also duplicated as `id`). This ID is passed
 
 The conversations base URL is derived from `CODEMIE_ENDPOINT` by replacing `/assistants` with `/conversations`.
 
-⚠️ Currently `create_conversation()` is called on every incoming request (every turn). This needs to be fixed — conversation creation should happen once per ElevenLabs session, not once per turn. Pending investigation of what session identifier ElevenLabs includes in requests.
+ElevenLabs includes a `traceparent` header on every request. The trace ID (second `-`-separated segment) is stable across all turns in a session. `get_elevenlabs_id()` extracts this and `get_or_create_conversation()` uses it to look up or create a CodemIE conversation ID, stored in `_conversation_store` (in-memory dict). Replace with DynamoDB for production.
 
 ### Conversation history
 We rely entirely on ElevenLabs to maintain conversation history. ElevenLabs sends the full message history on every request (standard OpenAI chat completions behaviour). We convert this to CodemIE's `history` array format.
@@ -120,14 +118,13 @@ Raw JSON objects concatenated, no SSE wrapper:
 | Variable | Description | Secret? |
 |---|---|---|
 | `CODEMIE_ENDPOINT` | Base URL for CodemIE API | No |
-| `CODEMIE_ASSISTANT_ID` | ElevenLabs/CodemIE assistant UUID | No |
+| `CODEMIE_ASSISTANT_ID` | CodemIE assistant UUID | No |
 | `CODEMIE_ASSISTANT_FOLDER` | Human-readable name of the assistant (used when creating conversations) | No |
 | `CODEMIE_LLM_MODEL` | LLM model name | No |
-| `CODEMIE_OAUTH_PROXY_0_A` | First `_oauth2_proxy_0` cookie | Yes (SSM) |
-| `CODEMIE_OAUTH_PROXY_0_B` | Second `_oauth2_proxy_0` cookie | Yes (SSM) |
-| `CODEMIE_OAUTH_PROXY_1` | `_oauth2_proxy_1` cookie | Yes (SSM) |
-
-⚠️ SSM SecureString has a 4096 character limit. Cookie values may exceed this — use **AWS Secrets Manager** if needed (65536 char limit).
+| `KEYCLOAK_URL` | Keycloak token endpoint (has a default value) | No |
+| `KEYCLOAK_CLIENT` | Keycloak client ID (default: `codemie-sdk`) | No |
+| `CODEMIE_USERNAME` | Service account username for Keycloak | Yes |
+| `CODEMIE_PASSWORD` | Service account password for Keycloak | Yes |
 
 ---
 

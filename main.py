@@ -2,22 +2,21 @@
 ElevenLabs <-> CodemIE Bridge
 Exposes an OpenAI-compatible /chat/completions endpoint.
 ElevenLabs agent calls this as its custom LLM.
-Translates to CodemIE's internal API format using cookie auth.
+Translates to CodemIE's internal API format using Keycloak bearer token auth.
 
-Cookie note: oauth2_proxy splits large tokens across multiple cookies
-with the same name. We store them as CODEMIE_OAUTH_PROXY_0_A and
-CODEMIE_OAUTH_PROXY_0_B (and _1) and send them as a raw Cookie header
-so duplicates are preserved correctly.
+Auth: Uses Keycloak ROPC flow to obtain a bearer token on startup.
+Token is cached and refreshed proactively when less than 1 hour remaining.
 
 Conversation mapping: ElevenLabs traceparent trace IDs are mapped to
-CodemIE conversation IDs in an in-memory dict. This is sufficient for
-a demo but should be replaced with DynamoDB for production.
+CodemIE conversation IDs in an in-memory dict. Sufficient for demo —
+replace with DynamoDB for production.
 """
 
 import os
 import json
 import logging
 import uuid
+import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
@@ -45,27 +44,104 @@ CODEMIE_ASSISTANT_FOLDER  = os.getenv("CODEMIE_ASSISTANT_FOLDER", "")
 CODEMIE_LLM_MODEL         = os.getenv("CODEMIE_LLM_MODEL", "claude-haiku-4-5-20251001")
 CODEMIE_CONVERSATIONS_URL = CODEMIE_ENDPOINT.rsplit("/assistants", 1)[0] + "/conversations"
 
-OAUTH_PROXY_0_A = os.getenv("CODEMIE_OAUTH_PROXY_0_A")
-OAUTH_PROXY_0_B = os.getenv("CODEMIE_OAUTH_PROXY_0_B")
-OAUTH_PROXY_1   = os.getenv("CODEMIE_OAUTH_PROXY_1")
+KEYCLOAK_URL    = os.getenv("KEYCLOAK_URL", "https://auth.codemie.lab.epam.com/realms/codemie-prod/protocol/openid-connect/token")
+KEYCLOAK_CLIENT = os.getenv("KEYCLOAK_CLIENT", "codemie-sdk")
+CODEMIE_USERNAME = os.getenv("CODEMIE_USERNAME")
+CODEMIE_PASSWORD = os.getenv("CODEMIE_PASSWORD")
 
 if not CODEMIE_ASSISTANT_ID:
     raise RuntimeError("CODEMIE_ASSISTANT_ID is not set")
-if not OAUTH_PROXY_0_A or not OAUTH_PROXY_1:
-    raise RuntimeError("CODEMIE_OAUTH_PROXY_0_A and CODEMIE_OAUTH_PROXY_1 must be set")
+if not CODEMIE_USERNAME or not CODEMIE_PASSWORD:
+    raise RuntimeError("CODEMIE_USERNAME and CODEMIE_PASSWORD must be set")
+
+
+# ── Token cache ────────────────────────────────────────────────────────────────
+
+class TokenCache:
+    """
+    Caches the Keycloak bearer token and handles proactive refresh.
+    Refreshes when less than 1 hour (3600s) remaining on the access token.
+    Falls back to full re-auth if refresh token has also expired.
+    """
+    def __init__(self):
+        self.access_token: str | None = None
+        self.refresh_token: str | None = None
+        self.access_expires_at: float = 0
+        self.refresh_expires_at: float = 0
+
+    def is_access_token_valid(self) -> bool:
+        return self.access_token is not None and time.time() < (self.access_expires_at - 3600)
+
+    def is_refresh_token_valid(self) -> bool:
+        return self.refresh_token is not None and time.time() < (self.refresh_expires_at - 60)
+
+    async def get_token(self) -> str:
+        if self.is_access_token_valid():
+            return self.access_token
+
+        if self.is_refresh_token_valid():
+            await self._refresh()
+        else:
+            await self._authenticate()
+
+        return self.access_token
+
+    async def _authenticate(self):
+        logger.info("Authenticating with Keycloak (full auth)...")
+        data = {
+            "grant_type": "password",
+            "client_id": KEYCLOAK_CLIENT,
+            "username": CODEMIE_USERNAME,
+            "password": CODEMIE_PASSWORD,
+        }
+        await self._fetch_token(data)
+        logger.info("Keycloak authentication successful, token valid for %ds", 
+                   int(self.access_expires_at - time.time()))
+
+    async def _refresh(self):
+        logger.info("Refreshing Keycloak token...")
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": KEYCLOAK_CLIENT,
+            "refresh_token": self.refresh_token,
+        }
+        try:
+            await self._fetch_token(data)
+            logger.info("Token refreshed successfully")
+        except Exception as e:
+            logger.warning("Token refresh failed, falling back to full auth: %s", e)
+            await self._authenticate()
+
+    async def _fetch_token(self, data: dict):
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                KEYCLOAK_URL,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Keycloak returned {response.status_code}: {response.text}"
+                )
+            token_data = response.json()
+            now = time.time()
+            self.access_token = token_data["access_token"]
+            self.refresh_token = token_data.get("refresh_token")
+            self.access_expires_at = now + token_data.get("expires_in", 518400)
+            self.refresh_expires_at = now + token_data.get("refresh_expires_in", 604800)
+
+
+token_cache = TokenCache()
 
 
 # ── Conversation store ─────────────────────────────────────────────────────────
 # Maps ElevenLabs traceparent trace ID -> CodemIE conversation ID.
-# In-memory for demo purposes. Replace with DynamoDB for production.
+# In-memory for demo. Replace with DynamoDB for production.
 _conversation_store: dict[str, str] = {}
 
 
 async def get_or_create_conversation(elevenlabs_id: str) -> str:
-    """
-    Look up the CodemIE conversation ID for a given ElevenLabs trace ID.
-    If none exists, create a new CodemIE conversation and store the mapping.
-    """
     if elevenlabs_id in _conversation_store:
         codemie_id = _conversation_store[elevenlabs_id]
         logger.info("[%s] Reusing CodemIE conversation: %s", elevenlabs_id, codemie_id)
@@ -79,10 +155,8 @@ async def get_or_create_conversation(elevenlabs_id: str) -> str:
 
 def get_elevenlabs_id(request: Request) -> str:
     """
-    Extract a stable session ID from the ElevenLabs request.
-    Uses the trace ID from the W3C traceparent header, which remains
-    constant across all requests in the same ElevenLabs conversation.
-    Falls back to a new UUID if the header is missing.
+    Extract stable session ID from ElevenLabs traceparent header.
+    The trace ID (second segment) is constant across all requests in a session.
     """
     traceparent = request.headers.get("traceparent", "")
     parts = traceparent.split("-")
@@ -91,34 +165,27 @@ def get_elevenlabs_id(request: Request) -> str:
     return str(uuid.uuid4())
 
 
-# ── Codemie:
-    """
-    Build a raw Cookie header string that preserves duplicate cookie names.
-    """
-    parts = [f"_oauth2_proxy_0={OAUTH_PROXY_0_A}"]
-    if OAUTH_PROXY_0_B:
-        parts.append(f"_oauth2_proxy_0={OAUTH_PROXY_0_B}")
-    parts.append(f"_oauth2_proxy_1={OAUTH_PROXY_1}")
-    return "; ".join(parts)
+# ── CodemIE helpers ────────────────────────────────────────────────────────────
+
+async def get_auth_headers() -> dict:
+    token = await token_cache.get_token()
+    return {
+        "Content-Type": "application/json",
+        "Accept": "*/*",
+        "Authorization": f"Bearer {token}",
+        "Origin": "https://codemie.lab.epam.com",
+        "Referer": "https://codemie.lab.epam.com/",
+        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
+    }
 
 
 async def create_conversation() -> str:
-    """
-    Create a new CodemIE conversation and return its conversation_id.
-    """
     payload = {
         "initial_assistant_id": CODEMIE_ASSISTANT_ID,
         "folder": CODEMIE_ASSISTANT_FOLDER,
         "is_workflow": False,
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "*/*",
-        "Origin": "https://codemie.lab.epam.com",
-        "Referer": "https://codemie.lab.epam.com/",
-        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
-        "Cookie": build_cookie_header(),
-    }
+    headers = await get_auth_headers()
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(CODEMIE_CONVERSATIONS_URL, json=payload, headers=headers)
         if response.status_code not in (200, 201):
@@ -134,10 +201,6 @@ async def create_conversation() -> str:
 
 
 def build_codemie_request(messages: list, conversation_id: str) -> dict:
-    """
-    Convert OpenAI-style messages into CodemIE request format.
-    The last user message becomes 'text', prior turns become 'history'.
-    """
     now = datetime.now(timezone.utc).isoformat()
     history = []
     last_user_text = ""
@@ -150,11 +213,7 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
             continue
         elif role == "user":
             last_user_text = content
-            history.append({
-                "role": "User",
-                "message": content,
-                "createdAt": now,
-            })
+            history.append({"role": "User", "message": content, "createdAt": now})
         elif role == "assistant":
             history.append({
                 "role": "Assistant",
@@ -163,13 +222,11 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
                 "assistantId": CODEMIE_ASSISTANT_ID,
             })
 
-    # Remove the last user message from history (it becomes 'text')
     if history and history[-1]["role"] == "User":
         history = history[:-1]
 
     system_prompt = next(
-        (m.get("content", "") for m in messages if m.get("role") == "system"),
-        ""
+        (m.get("content", "") for m in messages if m.get("role") == "system"), ""
     )
 
     return {
@@ -197,47 +254,24 @@ async def stream_codemie_response(
     conversation_id: str,
     elevenlabs_id: str,
 ) -> AsyncGenerator[str, None]:
-    """
-    Call CodemIE, parse the streaming JSON chunks,
-    and re-emit as OpenAI SSE format for ElevenLabs.
-    """
     url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
     payload = build_codemie_request(messages, conversation_id)
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "*/*",
-        "Origin": "https://codemie.lab.epam.com",
-        "Referer": "https://codemie.lab.epam.com/",
-        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
-        "Cookie": build_cookie_header(),
-    }
-
+    headers = await get_auth_headers()
     full_response = []
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST", url,
-                json=payload,
-                headers=headers,
-            ) as response:
-
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    logger.error(
-                        "[%s] CodemIE returned %d: %s",
-                        elevenlabs_id, response.status_code, body.decode()
-                    )
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"CodemIE returned {response.status_code}"
-                    )
+                    logger.error("[%s] CodemIE returned %d: %s",
+                                 elevenlabs_id, response.status_code, body.decode())
+                    raise HTTPException(status_code=502,
+                                        detail=f"CodemIE returned {response.status_code}")
 
                 buffer = ""
                 async for raw_chunk in response.aiter_text():
                     buffer += raw_chunk
-
                     while buffer:
                         try:
                             obj, idx = json.JSONDecoder().raw_decode(buffer)
@@ -249,8 +283,6 @@ async def stream_codemie_response(
                         is_last = obj.get("last", False)
 
                         if is_last:
-                            # Just capture for logging — don't re-send,
-                            # content was already streamed via thought chunks
                             generated = obj.get("generated", "")
                             if generated:
                                 full_response = [generated]
@@ -259,11 +291,7 @@ async def stream_codemie_response(
                             full_response.append(text)
                             chunk = {
                                 "object": "chat.completion.chunk",
-                                "choices": [{
-                                    "delta": {"content": text},
-                                    "index": 0,
-                                    "finish_reason": None,
-                                }],
+                                "choices": [{"delta": {"content": text}, "index": 0, "finish_reason": None}],
                             }
                             yield f"data: {json.dumps(chunk)}\n\n"
 
@@ -275,12 +303,16 @@ async def stream_codemie_response(
         logger.error("[%s] Error calling CodemIE: %s", elevenlabs_id, str(e))
         raise HTTPException(status_code=502, detail=str(e))
 
-    done_chunk = {
-        "object": "chat.completion.chunk",
-        "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(done_chunk)}\n\n"
+    yield f"data: {json.dumps({'object': 'chat.completion.chunk', 'choices': [{'delta': {}, 'index': 0, 'finish_reason': 'stop'}]})}\n\n"
     yield "data: [DONE]\n\n"
+
+
+# ── Startup ────────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup():
+    """Authenticate with Keycloak on startup so the first request is fast."""
+    await token_cache._authenticate()
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -288,7 +320,6 @@ async def stream_codemie_response(
 @app.post("/chat/completions")
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    # Extract stable ElevenLabs session ID from traceparent header
     elevenlabs_id = get_elevenlabs_id(request)
 
     try:
@@ -300,7 +331,6 @@ async def chat_completions(request: Request):
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    # Get or create a CodemIE conversation for this ElevenLabs session
     codemie_conversation_id = await get_or_create_conversation(elevenlabs_id)
 
     user_messages = [m for m in messages if m.get("role") == "user"]
@@ -310,10 +340,7 @@ async def chat_completions(request: Request):
     return StreamingResponse(
         stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -325,41 +352,27 @@ async def health():
         "model": CODEMIE_LLM_MODEL,
         "assistant_id": CODEMIE_ASSISTANT_ID,
         "active_conversations": len(_conversation_store),
+        "token_valid": token_cache.is_access_token_valid(),
+        "token_expires_in_seconds": max(0, int(token_cache.access_expires_at - time.time())),
     }
 
 
 @app.get("/ping")
 async def ping():
-    """
-    Quick sanity check — sends a hello to CodemIE and returns the response.
-    Hit this in a browser to verify cookies and connectivity are working.
-    """
+    """Sends a test message to CodemIE. Use to verify auth and connectivity."""
     messages = [{"role": "user", "content": "Hello! Please respond with a short greeting."}]
-    ping_elevenlabs_id = "ping-" + str(uuid.uuid4())[:8]
+    ping_id = "ping-" + str(uuid.uuid4())[:8]
     conversation_id = await create_conversation()
-
     url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
     payload = build_codemie_request(messages, conversation_id)
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "*/*",
-        "Origin": "https://codemie.lab.epam.com",
-        "Referer": "https://codemie.lab.epam.com/",
-        "User-Agent": "Mozilla/5.0 (ElevenLabs-Bridge/1.0)",
-        "Cookie": build_cookie_header(),
-    }
+    headers = await get_auth_headers()
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    return {
-                        "status": "error",
-                        "http_status": response.status_code,
-                        "detail": body.decode(),
-                    }
+                    return {"status": "error", "http_status": response.status_code, "detail": body.decode()}
 
                 buffer = ""
                 async for raw_chunk in response.aiter_text():
@@ -372,11 +385,11 @@ async def ping():
                             break
                         if obj.get("last"):
                             generated = obj.get("generated", "")
-                            logger.info("[%s] PING response: %s", ping_elevenlabs_id, generated)
+                            logger.info("[%s] PING response: %s", ping_id, generated)
                             return {"status": "ok", "response": generated}
 
         return {"status": "error", "detail": "No response received from CodemIE"}
 
     except Exception as e:
-        logger.error("[%s] Ping failed: %s", ping_elevenlabs_id, str(e))
+        logger.error("[%s] Ping failed: %s", ping_id, str(e))
         return {"status": "error", "detail": str(e)}

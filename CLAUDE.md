@@ -28,8 +28,11 @@ Everything lives in `main.py`. Key components:
 - **`/chat/completions` and `/v1/chat/completions`** — accept OpenAI-format requests, return OpenAI-format SSE streaming responses
 - **`build_codemie_request()`** — translates OpenAI `messages[]` to CodemIE format (system prompt + history + current user message wrapped in `<p>` tags)
 - **`stream_codemie_response()`** — async HTTP streaming call to CodemIE, converts JSON chunks to OpenAI SSE format
-- **`create_conversation()`** — POSTs to CodemIE's `/v1/conversations` endpoint to obtain a `conversation_id` before each chat; uses `CODEMIE_ASSISTANT_ID` and `CODEMIE_ASSISTANT_FOLDER`
-- **`build_cookie_header()`** — constructs `oauth2_proxy` auth cookies from three env vars (`CODEMIE_OAUTH_PROXY_0_A`, `CODEMIE_OAUTH_PROXY_0_B`, `CODEMIE_OAUTH_PROXY_1`); `_oauth2_proxy_0` appears twice to split large tokens
+- **`TokenCache`** — fetches and caches a Keycloak bearer token (ROPC flow); proactively refreshes when <1 hour remains; authenticates on startup
+- **`get_auth_headers()`** — returns headers with `Authorization: Bearer <token>` for all CodemIE calls
+- **`get_elevenlabs_id()`** — extracts the stable trace ID from ElevenLabs' `traceparent` header to use as session key
+- **`get_or_create_conversation()`** — maps ElevenLabs session ID → CodemIE conversation ID using an in-memory dict; creates a new conversation via `create_conversation()` on first turn
+- **`create_conversation()`** — POSTs to CodemIE's `/v1/conversations` to obtain a `conversation_id`
 
 ## Configuration
 
@@ -41,14 +44,14 @@ Required environment variables (in `.env` locally, AWS Secrets Manager in prod):
 | `CODEMIE_ASSISTANT_ID` | Which CodemIE assistant to use |
 | `CODEMIE_ASSISTANT_FOLDER` | Human-readable name of the assistant (used when creating conversations) |
 | `CODEMIE_LLM_MODEL` | Model name (e.g. `claude-haiku-4-5-20251001`) |
-| `CODEMIE_OAUTH_PROXY_0_A` | First half of `_oauth2_proxy_0` cookie |
-| `CODEMIE_OAUTH_PROXY_0_B` | Second half of `_oauth2_proxy_0` cookie |
-| `CODEMIE_OAUTH_PROXY_1` | `_oauth2_proxy_1` cookie |
-
-OAuth cookies expire and must be manually refreshed — this is a known limitation.
+| `KEYCLOAK_URL` | Keycloak token endpoint (has a sensible default) |
+| `KEYCLOAK_CLIENT` | Keycloak client ID (default: `codemie-sdk`) |
+| `CODEMIE_USERNAME` | Service account username |
+| `CODEMIE_PASSWORD` | Service account password |
 
 ## Known issues
 
-- Conversation ID is created via `POST /v1/conversations` on CodemIE at the start of each request — currently once per turn, needs session tracking to create it only once per ElevenLabs conversation
+- Conversation store is in-memory (`_conversation_store` dict) — sufficient for demo, replace with DynamoDB for production
+- `/health` now exposes `token_valid` and `token_expires_in_seconds` for monitoring token state
 - No test suite exists
 - Deployed to AWS App Runner via `apprunner.yaml`
