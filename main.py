@@ -225,9 +225,6 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
     if history and history[-1]["role"] == "User":
         history = history[:-1]
 
-    system_prompt = next(
-        (m.get("content", "") for m in messages if m.get("role") == "system"), ""
-    )
 
     return {
         "conversationId": conversation_id,
@@ -241,7 +238,7 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
         "workflowExecutionId": None,
         "stream": True,
         "topK": 10,
-        "systemPrompt": system_prompt,
+        "systemPrompt": "",  # Always empty — let CodemIE assistant's own prompt take effect
         "backgroundTask": False,
         "metadata": None,
         "toolsConfig": [],
@@ -360,14 +357,13 @@ async def health():
 @app.get("/ping")
 async def ping():
     """Sends a test message to CodemIE. Use to verify auth and connectivity."""
-    messages = [{"role": "user", "content": "What is your purpose?"}]
+    messages = [{"role": "user", "content": "Hello! Please respond with a short greeting."}]
     ping_id = "ping-" + str(uuid.uuid4())[:8]
     conversation_id = await create_conversation()
     url = f"{CODEMIE_ENDPOINT}/{CODEMIE_ASSISTANT_ID}/model"
     payload = build_codemie_request(messages, conversation_id)
     headers = await get_auth_headers()
 
-    logger.info("calling ping...")
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
@@ -389,7 +385,6 @@ async def ping():
                             logger.info("[%s] PING response: %s", ping_id, generated)
                             return {"status": "ok", "response": generated}
 
-        logger.info("calling ping success")
         return {"status": "error", "detail": "No response received from CodemIE"}
 
     except Exception as e:
