@@ -257,6 +257,7 @@ async def stream_codemie_response(
     full_response = []
 
     try:
+        codemie_start = time.monotonic()
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
@@ -292,7 +293,8 @@ async def stream_codemie_response(
                             }
                             yield f"data: {json.dumps(chunk)}\n\n"
 
-        logger.info("[%s] ASSISTANT: %s", elevenlabs_id, "".join(full_response))
+        codemie_ms = int((time.monotonic() - codemie_start) * 1000)
+        logger.info("[%s] ASSISTANT (%dms): %s", elevenlabs_id, codemie_ms, "".join(full_response))
 
     except HTTPException:
         raise
@@ -334,8 +336,17 @@ async def chat_completions(request: Request):
     if user_messages:
         logger.info("[%s] USER: %s", elevenlabs_id, user_messages[-1]["content"])
 
+    async def timed_stream() -> AsyncGenerator[str, None]:
+        start = time.monotonic()
+        try:
+            async for chunk in stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id):
+                yield chunk
+        finally:
+            total_ms = int((time.monotonic() - start) * 1000)
+            logger.info("[%s] chat_completions total duration: %dms", elevenlabs_id, total_ms)
+
     return StreamingResponse(
-        stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id),
+        timed_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -364,6 +375,8 @@ async def ping():
     payload = build_codemie_request(messages, conversation_id)
     headers = await get_auth_headers()
 
+    start = time.monotonic()
+    timestamp = datetime.now(timezone.utc).isoformat()
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
@@ -382,8 +395,9 @@ async def ping():
                             break
                         if obj.get("last"):
                             generated = obj.get("generated", "")
-                            logger.info("[%s] PING response: %s", ping_id, generated)
-                            return {"status": "ok", "response": generated}
+                            duration_ms = int((time.monotonic() - start) * 1000)
+                            logger.info("[%s] PING response (%dms): %s", ping_id, duration_ms, generated)
+                            return {"status": "ok", "response": generated, "duration_ms": duration_ms, "timestamp": timestamp}
 
         return {"status": "error", "detail": "No response received from CodemIE"}
 

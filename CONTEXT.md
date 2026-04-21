@@ -45,15 +45,16 @@ CodemIE does NOT use standard SSE (`data: {...}\n\n`). It streams raw JSON objec
 ```
 - Intermediate chunks: text is in `thought.message`
 - Final chunk: `last: true`, full text in `generated` (we skip re-sending this to avoid duplication)
-- We parse these using `json.JSONDecoder().raw_decode()` in a buffer loop
+- We parse these using `json.JSONDecoder().raw_decode()` in a buffer loop, encapsulated in the shared `_iter_codemie_chunks()` async generator used by both `stream_codemie_response()` and `/ping`
 
 ### Bearer token authentication (Keycloak)
 Auth uses Keycloak ROPC (Resource Owner Password Credentials) flow with a service account (`CODEMIE_USERNAME` / `CODEMIE_PASSWORD`). This replaced the previous browser cookie approach.
 
-- On startup, `TokenCache._authenticate()` fetches an access token and refresh token from Keycloak
+- On startup, `TokenCache._authenticate()` is called via FastAPI's `lifespan` context manager (replaces deprecated `@app.on_event("startup")`)
+- This fetches an access token and refresh token from Keycloak
 - `TokenCache.get_token()` is called before every CodemIE request; it returns the cached token if more than 1 hour remains, otherwise refreshes proactively
 - If the refresh token has also expired, it falls back to full re-authentication
-- All CodemIE requests use `Authorization: Bearer <token>` header via `get_auth_headers()`
+- All CodemIE requests use `Authorization: Bearer <token>` merged with `_STATIC_HEADERS` (a module-level constant) via `get_auth_headers()`
 - `/health` exposes `token_valid` and `token_expires_in_seconds` for monitoring
 
 ### Conversation creation
@@ -157,7 +158,7 @@ run:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Service status |
-| `/ping` | GET | Sends test message to CodemIE, returns response — useful for verifying cookies |
+| `/ping` | GET | Sends test message to CodemIE, returns response — useful for verifying auth and connectivity |
 | `/chat/completions` | POST | OpenAI-compatible endpoint (used by ElevenLabs) |
 | `/v1/chat/completions` | POST | Same, alternate path |
 
@@ -173,11 +174,10 @@ run:
 
 ## Known issues / future work
 
-1. **Cookie expiry** — manual process to refresh. Next step: get proper API credentials from CodemIE platform team
-2. **Latency** — extra hop through App Runner adds some latency vs direct LLM call. Still acceptable for PoC
-3. **ElevenLabs server region** — likely US by default, adding transatlantic latency. Enterprise plan allows EU data residency
-4. **No monitoring** — CloudWatch logs exist but no alerting set up
-5. **Response duplication fixed** — earlier bug where CodemIE response was sent twice (once via thought chunks, once via final `generated` field). Fixed by skipping the `generated` field re-send
+1. **Latency** — extra hop through App Runner adds some latency vs direct LLM call. Still acceptable for PoC
+2. **ElevenLabs server region** — likely US by default, adding transatlantic latency. Enterprise plan allows EU data residency
+3. **No monitoring** — CloudWatch logs exist but no alerting set up
+4. **In-memory conversation store** — `_conversation_store` dict is lost on restart; replace with DynamoDB for production
 
 ---
 

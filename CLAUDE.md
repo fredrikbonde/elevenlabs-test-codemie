@@ -27,9 +27,10 @@ Everything lives in `main.py`. Key components:
 
 - **`/chat/completions` and `/v1/chat/completions`** — accept OpenAI-format requests, return OpenAI-format SSE streaming responses
 - **`build_codemie_request()`** — translates OpenAI `messages[]` to CodemIE format (system prompt + history + current user message wrapped in `<p>` tags)
+- **`_iter_codemie_chunks()`** — async generator that parses CodemIE's concatenated-JSON stream into discrete objects using `json.JSONDecoder().raw_decode()`; shared by both `stream_codemie_response()` and `/ping`
 - **`stream_codemie_response()`** — async HTTP streaming call to CodemIE, converts JSON chunks to OpenAI SSE format
-- **`TokenCache`** — fetches and caches a Keycloak bearer token (ROPC flow); proactively refreshes when <1 hour remains; authenticates on startup
-- **`get_auth_headers()`** — returns headers with `Authorization: Bearer <token>` for all CodemIE calls
+- **`TokenCache`** — fetches and caches a Keycloak bearer token (ROPC flow); proactively refreshes when <1 hour remains; authenticates via `lifespan` on startup
+- **`_STATIC_HEADERS`** — module-level constant holding the fixed request headers; `get_auth_headers()` merges in the `Authorization: Bearer <token>` header
 - **`get_elevenlabs_id()`** — extracts the stable trace ID from ElevenLabs' `traceparent` header to use as session key
 - **`get_or_create_conversation()`** — maps ElevenLabs session ID → CodemIE conversation ID using an in-memory dict; creates a new conversation via `create_conversation()` on first turn
 - **`create_conversation()`** — POSTs to CodemIE's `/v1/conversations` to obtain a `conversation_id`
