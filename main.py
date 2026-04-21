@@ -1,14 +1,14 @@
 """
-ElevenLabs <-> CodemIE Bridge
+ElevenLabs <-> CodeMie Bridge
 Exposes an OpenAI-compatible /chat/completions endpoint.
 ElevenLabs agent calls this as its custom LLM.
-Translates to CodemIE's internal API format using Keycloak bearer token auth.
+Translates to CodeMie's internal API format using Keycloak bearer token auth.
 
 Auth: Uses Keycloak ROPC flow to obtain a bearer token on startup.
 Token is cached and refreshed proactively when less than 1 hour remaining.
 
 Conversation mapping: ElevenLabs traceparent trace IDs are mapped to
-CodemIE conversation IDs in an in-memory dict. Sufficient for demo —
+CodeMie conversation IDs in an in-memory dict. Sufficient for demo —
 replace with DynamoDB for production.
 """
 
@@ -36,7 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-app = FastAPI(title="ElevenLabs-CodemIE Bridge")
+app = FastAPI(title="ElevenLabs-CodeMie Bridge")
 
 CODEMIE_ENDPOINT          = os.getenv("CODEMIE_ENDPOINT", "https://codemie.lab.epam.com/code-assistant-api/v1/assistants")
 CODEMIE_ASSISTANT_ID      = os.getenv("CODEMIE_ASSISTANT_ID")
@@ -136,7 +136,7 @@ token_cache = TokenCache()
 
 
 # ── Conversation store ─────────────────────────────────────────────────────────
-# Maps ElevenLabs traceparent trace ID -> CodemIE conversation ID.
+# Maps ElevenLabs traceparent trace ID -> CodeMie conversation ID.
 # In-memory for demo. Replace with DynamoDB for production.
 _conversation_store: dict[str, str] = {}
 
@@ -144,12 +144,12 @@ _conversation_store: dict[str, str] = {}
 async def get_or_create_conversation(elevenlabs_id: str) -> str:
     if elevenlabs_id in _conversation_store:
         codemie_id = _conversation_store[elevenlabs_id]
-        logger.info("[%s] Reusing CodemIE conversation: %s", elevenlabs_id, codemie_id)
+        logger.info("[%s] Reusing CodeMie conversation: %s", elevenlabs_id, codemie_id)
         return codemie_id
 
     codemie_id = await create_conversation()
     _conversation_store[elevenlabs_id] = codemie_id
-    logger.info("[%s] Created new CodemIE conversation: %s", elevenlabs_id, codemie_id)
+    logger.info("[%s] Created new CodeMie conversation: %s", elevenlabs_id, codemie_id)
     return codemie_id
 
 
@@ -165,7 +165,7 @@ def get_elevenlabs_id(request: Request) -> str:
     return str(uuid.uuid4())
 
 
-# ── CodemIE helpers ────────────────────────────────────────────────────────────
+# ── CodeMie helpers ────────────────────────────────────────────────────────────
 
 async def get_auth_headers() -> dict:
     token = await token_cache.get_token()
@@ -191,12 +191,12 @@ async def create_conversation() -> str:
         if response.status_code not in (200, 201):
             raise HTTPException(
                 status_code=502,
-                detail=f"Failed to create conversation: CodemIE returned {response.status_code}"
+                detail=f"Failed to create conversation: CodeMie returned {response.status_code}"
             )
         data = response.json()
         conversation_id = data.get("conversation_id") or data.get("id")
         if not conversation_id:
-            raise HTTPException(status_code=502, detail="CodemIE returned no conversation_id")
+            raise HTTPException(status_code=502, detail="CodeMie returned no conversation_id")
         return conversation_id
 
 
@@ -238,7 +238,7 @@ def build_codemie_request(messages: list, conversation_id: str) -> dict:
         "workflowExecutionId": None,
         "stream": True,
         "topK": 10,
-        "systemPrompt": "",  # Always empty — let CodemIE assistant's own prompt take effect
+        "systemPrompt": "",  # Always empty — let CodeMie assistant's own prompt take effect
         "backgroundTask": False,
         "metadata": None,
         "toolsConfig": [],
@@ -262,10 +262,10 @@ async def stream_codemie_response(
             async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    logger.error("[%s] CodemIE returned %d: %s",
+                    logger.error("[%s] CodeMie returned %d: %s",
                                  elevenlabs_id, response.status_code, body.decode())
                     raise HTTPException(status_code=502,
-                                        detail=f"CodemIE returned {response.status_code}")
+                                        detail=f"CodeMie returned {response.status_code}")
 
                 buffer = ""
                 async for raw_chunk in response.aiter_text():
@@ -299,7 +299,7 @@ async def stream_codemie_response(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("[%s] Error calling CodemIE: %s", elevenlabs_id, str(e))
+        logger.error("[%s] Error calling CodeMie: %s", elevenlabs_id, str(e))
         raise HTTPException(status_code=502, detail=str(e))
 
     yield f"data: {json.dumps({'object': 'chat.completion.chunk', 'choices': [{'delta': {}, 'index': 0, 'finish_reason': 'stop'}]})}\n\n"
@@ -360,7 +360,7 @@ async def chat_completions(request: Request):
 async def health():
     return {
         "status": "ok",
-        "backend": "CodemIE",
+        "backend": "CodeMie",
         "model": CODEMIE_LLM_MODEL,
         "assistant_id": CODEMIE_ASSISTANT_ID,
         "active_conversations": len(_conversation_store),
@@ -371,7 +371,7 @@ async def health():
 
 @app.get("/ping")
 async def ping():
-    """Sends a test message to CodemIE. Use to verify auth and connectivity."""
+    """Sends a test message to CodeMie. Use to verify auth and connectivity."""
     messages = [{"role": "user", "content": "Hello! Please respond with a short greeting."}]
     ping_id = "ping-" + str(uuid.uuid4())[:8]
     conversation_id = await create_conversation()
@@ -403,7 +403,7 @@ async def ping():
                             logger.info("[%s] PING response (%dms): %s", ping_id, duration_ms, generated)
                             return {"status": "ok", "response": generated, "duration_ms": duration_ms, "timestamp": timestamp}
 
-        return {"status": "error", "detail": "No response received from CodemIE"}
+        return {"status": "error", "detail": "No response received from CodeMie"}
 
     except Exception as e:
         logger.error("[%s] Ping failed: %s", ping_id, str(e))

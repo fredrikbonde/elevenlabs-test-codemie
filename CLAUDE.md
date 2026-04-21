@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-A single-file FastAPI bridge that connects ElevenLabs voice agents to EPAM's internal CodemIE LLM platform. It exposes an OpenAI-compatible `/chat/completions` endpoint so ElevenLabs can talk to CodemIE as if it were OpenAI.
+A single-file FastAPI bridge that connects ElevenLabs voice agents to EPAM's internal CodeMie LLM platform. It exposes an OpenAI-compatible `/chat/completions` endpoint so ElevenLabs can talk to CodeMie as if it were OpenAI.
 
 ```
-ElevenLabs voice agent → this app (OpenAI API format) → CodemIE (EPAM internal LLM)
+ElevenLabs voice agent → this app (OpenAI API format) → CodeMie (EPAM internal LLM)
 ```
 
 ## Commands
@@ -19,21 +19,21 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 Health checks:
 - `GET /health` — service status + model info
-- `GET /ping` — test CodemIE connectivity
+- `GET /ping` — test CodeMie connectivity
 
 ## Architecture
 
 Everything lives in `main.py`. Key components:
 
 - **`/chat/completions` and `/v1/chat/completions`** — accept OpenAI-format requests, return OpenAI-format SSE streaming responses
-- **`build_codemie_request()`** — translates OpenAI `messages[]` to CodemIE format (system prompt + history + current user message wrapped in `<p>` tags)
-- **`_iter_codemie_chunks()`** — async generator that parses CodemIE's concatenated-JSON stream into discrete objects using `json.JSONDecoder().raw_decode()`; shared by both `stream_codemie_response()` and `/ping`
-- **`stream_codemie_response()`** — async HTTP streaming call to CodemIE, converts JSON chunks to OpenAI SSE format
+- **`build_codemie_request()`** — translates OpenAI `messages[]` to CodeMie format (system prompt + history + current user message wrapped in `<p>` tags)
+- **`_iter_codemie_chunks()`** — async generator that parses CodeMie's concatenated-JSON stream into discrete objects using `json.JSONDecoder().raw_decode()`; shared by both `stream_codemie_response()` and `/ping`
+- **`stream_codemie_response()`** — async HTTP streaming call to CodeMie, converts JSON chunks to OpenAI SSE format
 - **`TokenCache`** — fetches and caches a Keycloak bearer token (ROPC flow); proactively refreshes when <1 hour remains; authenticates via `lifespan` on startup
 - **`_STATIC_HEADERS`** — module-level constant holding the fixed request headers; `get_auth_headers()` merges in the `Authorization: Bearer <token>` header
 - **`get_elevenlabs_id()`** — extracts the stable trace ID from ElevenLabs' `traceparent` header to use as session key
-- **`get_or_create_conversation()`** — maps ElevenLabs session ID → CodemIE conversation ID using an in-memory dict; creates a new conversation via `create_conversation()` on first turn
-- **`create_conversation()`** — POSTs to CodemIE's `/v1/conversations` to obtain a `conversation_id`
+- **`get_or_create_conversation()`** — maps ElevenLabs session ID → CodeMie conversation ID using an in-memory dict; creates a new conversation via `create_conversation()` on first turn
+- **`create_conversation()`** — POSTs to CodeMie's `/v1/conversations` to obtain a `conversation_id`
 
 ## Configuration
 
@@ -41,8 +41,8 @@ Required environment variables (in `.env` locally, AWS Secrets Manager in prod):
 
 | Variable | Purpose |
 |---|---|
-| `CODEMIE_ENDPOINT` | CodemIE API base URL |
-| `CODEMIE_ASSISTANT_ID` | Which CodemIE assistant to use |
+| `CODEMIE_ENDPOINT` | CodeMie API base URL |
+| `CODEMIE_ASSISTANT_ID` | Which CodeMie assistant to use |
 | `CODEMIE_ASSISTANT_FOLDER` | Human-readable name of the assistant (used when creating conversations) |
 | `CODEMIE_LLM_MODEL` | Model name (e.g. `claude-haiku-4-5-20251001`) |
 | `KEYCLOAK_URL` | Keycloak token endpoint (has a sensible default) |
