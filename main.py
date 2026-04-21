@@ -330,7 +330,7 @@ async def chat_completions(request: Request):
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    codemie_conversation_id = await get_or_create_conversation(elevenlabs_id)
+    # codemie_conversation_id = await get_or_create_conversation(elevenlabs_id)
 
     user_messages = [m for m in messages if m.get("role") == "user"]
     if user_messages:
@@ -339,8 +339,13 @@ async def chat_completions(request: Request):
     async def timed_stream() -> AsyncGenerator[str, None]:
         start = time.monotonic()
         try:
-            async for chunk in stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id):
-                yield chunk
+            # DEBUG: hardcoded response to isolate CodemIE latency
+            hello_chunk = {"object": "chat.completion.chunk", "choices": [{"delta": {"content": "Hello world"}, "index": 0, "finish_reason": None}]}
+            yield f"data: {json.dumps(hello_chunk)}\n\n"
+            yield f"data: {json.dumps({'object': 'chat.completion.chunk', 'choices': [{'delta': {}, 'index': 0, 'finish_reason': 'stop'}]})}\n\n"
+            yield "data: [DONE]\n\n"
+            # async for chunk in stream_codemie_response(messages, codemie_conversation_id, elevenlabs_id):
+            #     yield chunk
         finally:
             total_ms = int((time.monotonic() - start) * 1000)
             logger.info("[%s] chat_completions total duration: %dms", elevenlabs_id, total_ms)
