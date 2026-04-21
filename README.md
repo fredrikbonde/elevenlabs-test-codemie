@@ -103,7 +103,7 @@ https://your-url.eu-central-1.awsapprunner.com/ping
    (ElevenLabs appends `/chat/completions` automatically)
 6. Save the agent
 
-The system prompt configured in ElevenLabs is passed through to CodeMie automatically.
+The system prompt configured in ElevenLabs is filtered out in bridge/proxy before reaching CodeMie.
 
 ---
 
