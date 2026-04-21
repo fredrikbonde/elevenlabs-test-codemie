@@ -15,9 +15,9 @@ run:
     - name: CODEMIE_ENDPOINT
       value: "https://codemie.lab.epam.com/code-assistant-api/v1/assistants"
     - name: CODEMIE_ASSISTANT_ID
-      value: "5d6764cb-ddb9-4b69-8097-e0125b941c51"
+      value: "bafee5b3-1e7b-4ef0-8208-711043c572dc"
     - name: CODEMIE_ASSISTANT_FOLDER
-      value: "ElevenLabs"
+      value: "VodafoneZiggo Digital Assistant"
     - name: CODEMIE_LLM_MODEL
       value: "claude-haiku-4-5-20251001"
     - name: KEYCLOAK_URL
